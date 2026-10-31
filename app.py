@@ -1,0 +1,525 @@
+from __future__ import annotations
+
+import html
+import io
+import json
+import os
+
+import streamlit as st
+import streamlit.components.v1 as components
+from dotenv import load_dotenv
+from PIL import Image
+
+from anuvaadhub_client import AnuvaadHubASRClient, AnuvaadHubError
+from anuvaadhub_mt_client import AnuvaadHubMTClient, AnuvaadHubMTError
+from anuvaadhub_tts_client import AnuvaadHubTTSClient, AnuvaadHubTTSError
+from mode_utils import detect_mode
+
+load_dotenv()
+st.set_page_config(page_title="SahAI | Accessible Language Companion", page_icon="🧭", layout="wide")
+
+LANGUAGES = {
+    "English": "en",
+    "Hindi (हिन्दी)": "hi",
+    "Punjabi (ਪੰਜਾਬੀ)": "pa",
+}
+LANG_LABEL_BY_CODE = {code: label for label, code in LANGUAGES.items()}
+TESSERACT_LANGS = {"en": "eng", "hi": "hin", "pa": "pan"}
+BROWSER_VOICE_LANG = {"en": "en-IN", "hi": "hi-IN", "pa": "pa-IN"}
+
+COPY = {
+    "en": {
+        "welcome": "Welcome. Choose how you want to use this app: help reading with a camera, turn speech into text, or speak a typed message aloud. You can tap a button or record your answer.",
+        "choose": "Choose an accessibility mode",
+        "blind": "Blind / low vision",
+        "blind_desc": "Capture a menu or sign and read its text aloud.",
+        "deaf": "Deaf / hard of hearing",
+        "deaf_desc": "Turn nearby speech into readable text and translate it.",
+        "speech": "Non-speaking / speech difficulty",
+        "speech_desc": "Type a message and let the app speak it aloud.",
+        "record_mode": "Or record your answer to choose a mode",
+        "detect": "Identify mode from recording",
+        "listen": "Listen to this instruction",
+        "back": "← Back to mode selection",
+    },
+    "hi": {
+        "welcome": "नमस्ते। चुनें कि आप ऐप का उपयोग कैसे करना चाहते हैं: कैमरे से मेनू पढ़ना, आवाज़ को टेक्स्ट में बदलना, या लिखे हुए संदेश को बोलकर सुनाना। आप बटन दबा सकते हैं या अपना जवाब रिकॉर्ड कर सकते हैं।",
+        "choose": "सहायक मोड चुनें",
+        "blind": "दृष्टिबाधित / कम दिखाई देता है",
+        "blind_desc": "मेनू या बोर्ड की तस्वीर लेकर उसका टेक्स्ट पढ़ें।",
+        "deaf": "बधिर / सुनने में कठिनाई",
+        "deaf_desc": "आसपास की आवाज़ को पढ़ने योग्य टेक्स्ट में बदलें और अनुवाद करें।",
+        "speech": "बोलने में कठिनाई",
+        "speech_desc": "संदेश लिखें और ऐप से उसे बुलवाएँ।",
+        "record_mode": "या मोड चुनने के लिए अपना जवाब रिकॉर्ड करें",
+        "detect": "रिकॉर्डिंग से मोड पहचानें",
+        "listen": "निर्देश सुनें",
+        "back": "← मोड चयन पर वापस जाएँ",
+    },
+    "pa": {
+        "welcome": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ। ਚੁਣੋ ਕਿ ਤੁਸੀਂ ਐਪ ਕਿਵੇਂ ਵਰਤਣਾ ਚਾਹੁੰਦੇ ਹੋ: ਕੈਮਰੇ ਨਾਲ ਮੀਨੂ ਪੜ੍ਹਨਾ, ਬੋਲੀ ਨੂੰ ਲਿਖਤ ਵਿੱਚ ਬਦਲਣਾ, ਜਾਂ ਲਿਖੇ ਸੁਨੇਹੇ ਨੂੰ ਬੋਲ ਕੇ ਸੁਣਾਉਣਾ। ਤੁਸੀਂ ਬਟਨ ਦਬਾ ਸਕਦੇ ਹੋ ਜਾਂ ਆਪਣਾ ਜਵਾਬ ਰਿਕਾਰਡ ਕਰ ਸਕਦੇ ਹੋ।",
+        "choose": "ਸਹਾਇਕ ਮੋਡ ਚੁਣੋ",
+        "blind": "ਨਜ਼ਰ ਦੀ ਸਮੱਸਿਆ",
+        "blind_desc": "ਮੀਨੂ ਜਾਂ ਬੋਰਡ ਦੀ ਤਸਵੀਰ ਲੈ ਕੇ ਲਿਖਤ ਪੜ੍ਹੋ।",
+        "deaf": "ਸੁਣਨ ਵਿੱਚ ਮੁਸ਼ਕਲ",
+        "deaf_desc": "ਆਲੇ-ਦੁਆਲੇ ਦੀ ਬੋਲੀ ਨੂੰ ਪੜ੍ਹਨਯੋਗ ਲਿਖਤ ਵਿੱਚ ਬਦਲੋ ਅਤੇ ਅਨੁਵਾਦ ਕਰੋ।",
+        "speech": "ਬੋਲਣ ਵਿੱਚ ਮੁਸ਼ਕਲ",
+        "speech_desc": "ਸੁਨੇਹਾ ਲਿਖੋ ਅਤੇ ਐਪ ਤੋਂ ਬੁਲਵਾਓ।",
+        "record_mode": "ਜਾਂ ਮੋਡ ਚੁਣਨ ਲਈ ਆਪਣਾ ਜਵਾਬ ਰਿਕਾਰਡ ਕਰੋ",
+        "detect": "ਰਿਕਾਰਡਿੰਗ ਤੋਂ ਮੋਡ ਪਛਾਣੋ",
+        "listen": "ਇਹ ਹਦਾਇਤ ਸੁਣੋ",
+        "back": "← ਮੋਡ ਚੋਣ ਤੇ ਵਾਪਸ ਜਾਓ",
+    },
+}
+
+st.markdown(
+    """
+    <style>
+      .block-container {max-width: 1100px; padding-top: 1.4rem;}
+      h1, h2, h3, p, label, div[data-testid="stMarkdownContainer"] { line-height: 1.45; }
+      h1 {font-size: 2.35rem !important;}
+      h2 {font-size: 1.65rem !important;}
+      p, label, .stCaption {font-size: 1.05rem;}
+      div.stButton > button { min-height: 3rem; font-size: 1.05rem; border-radius: 0.75rem; }
+      textarea, input {font-size: 1.05rem !important;}
+      .mode-card {padding: 0.4rem 0.1rem 0.8rem 0.1rem;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def get_secret(name: str) -> str:
+    value = os.getenv(name, "")
+    try:
+        value = st.secrets.get(name, value)
+    except Exception:
+        pass
+    return str(value or "").strip()
+
+
+asr_client = AnuvaadHubASRClient(
+    endpoint=get_secret("ANUVAADHUB_ASR_URL"),
+    access_token=get_secret("ANUVAADHUB_API_TOKEN"),
+)
+
+TTS_SETTINGS = {
+    "en": ("ANUVAADHUB_TTS_EN", "English"),
+    "hi": ("ANUVAADHUB_TTS_HI", "Hindi"),
+    "pa": ("ANUVAADHUB_TTS_PA", "Punjabi"),
+}
+tts_clients = {
+    language: AnuvaadHubTTSClient(
+        endpoint=get_secret(f"{prefix}_URL"),
+        access_token=get_secret(f"{prefix}_TOKEN"),
+        settings_prefix=prefix,
+    )
+    for language, (prefix, _) in TTS_SETTINGS.items()
+}
+
+
+def browser_speak_button(text: str, language_code: str = "en", label: str = "🔊 Play audio") -> None:
+    """Browser-native speech fallback; this does not require API credentials."""
+    safe_text = json.dumps(text, ensure_ascii=False).replace("</", "<\\/")
+    voice_lang = BROWSER_VOICE_LANG.get(language_code, "en-IN")
+    safe_voice_lang = json.dumps(voice_lang)
+    safe_language_name = json.dumps(LANG_LABEL_BY_CODE.get(language_code, "selected language"))
+    safe_label = html.escape(label)
+    markup = f"""
+    <div style="font-family: sans-serif; padding: 2px 0;">
+      <button id="speakBtn" type="button" aria-label="{safe_label}"
+        style="font-size:17px; padding:11px 16px; border-radius:10px; cursor:pointer;">
+        {safe_label}
+      </button>
+      <span id="speakStatus" aria-live="polite" style="margin-left:10px;"></span>
+    </div>
+    <script>
+      const speakText = {safe_text};
+      const targetLang = {safe_voice_lang};
+      const languageName = {safe_language_name};
+      document.getElementById('speakBtn').addEventListener('click', () => {{
+        if (!('speechSynthesis' in window)) {{
+          document.getElementById('speakStatus').textContent = 'Speech playback is not available in this browser.';
+          return;
+        }}
+        const synth = window.speechSynthesis;
+        const status = document.getElementById('speakStatus');
+        const getVoices = () => synth.getVoices();
+        const waitForVoices = () => new Promise(resolve => {{
+          const current = getVoices();
+          if (current.length) {{ resolve(current); return; }}
+          let finished = false;
+          const finish = () => {{
+            if (finished) return;
+            finished = true;
+            synth.removeEventListener('voiceschanged', finish);
+            resolve(getVoices());
+          }};
+          synth.addEventListener('voiceschanged', finish);
+          setTimeout(finish, 1500);
+        }});
+
+        synth.cancel();
+        status.textContent = 'Checking available voices…';
+        waitForVoices().then(voices => {{
+          const languageCode = targetLang.toLowerCase().split('-')[0];
+          const matching = voices.find(v => v.lang.toLowerCase().split('-')[0] === languageCode);
+          if (!matching) {{
+            status.textContent = languageCode === 'pa'
+              ? 'No Punjabi voice is available on this device. Punjabi text-to-speech needs a Punjabi-capable voice or service.'
+              : `No ${{languageName}} voice is available on this device. Add a ${{languageName}} speech voice in Windows, then reopen the browser.`;
+            return;
+          }}
+
+          const utterance = new SpeechSynthesisUtterance(speakText);
+          utterance.lang = targetLang;
+          utterance.voice = matching;
+          utterance.rate = 0.9;
+          utterance.onstart = () => status.textContent = 'Playing…';
+          utterance.onend = () => status.textContent = 'Finished';
+          utterance.onerror = event => status.textContent = `Speech could not play: ${{event.error || 'unknown error'}}`;
+          synth.speak(utterance);
+        }});
+      }});
+    </script>
+    """
+    components.html(markup, height=58)
+
+
+def language_picker(label: str, key: str, default: str = "en") -> str:
+    labels = list(LANGUAGES.keys())
+    default_label = next((name for name, code in LANGUAGES.items() if code == default), labels[0])
+    selected = st.selectbox(label, labels, index=labels.index(default_label), key=key)
+    return LANGUAGES[selected]
+
+
+def report_api_error(exc: Exception) -> None:
+    st.error(str(exc))
+
+
+def run_transcription(audio_file, lang_code: str) -> str:
+    language = lang_code.lower().split("-")[0]
+
+    settings = {
+        "en": ("ANUVAADHUB_ASR_URL", "ANUVAADHUB_API_TOKEN"),
+        "hi": ("ANUVAADHUB_ASR_HINDI_URL", "ANUVAADHUB_ASR_HINDI_TOKEN"),
+        "pa": ("ANUVAADHUB_ASR_PUNJABI_URL", "ANUVAADHUB_ASR_PUNJABI_TOKEN"),
+    }
+
+    if language not in settings:
+        raise AnuvaadHubError(
+            f"Speech recognition is not configured for language: {lang_code}"
+        )
+
+    url_setting, token_setting = settings[language]
+    language_client = AnuvaadHubASRClient(
+        endpoint=get_secret(url_setting),
+        access_token=get_secret(token_setting),
+    )
+
+    return language_client.transcribe(audio_file.getvalue())
+
+
+def save_mode(mode: str) -> None:
+    st.session_state["mode"] = mode
+    st.rerun()
+
+
+def go_home() -> None:
+    st.session_state["mode"] = None
+    st.rerun()
+
+
+def speak_output(
+    text: str,
+    language_code: str,
+    key: str,
+    *,
+    button_label: str | None = None,
+    autoplay_audio: bool = False,
+) -> None:
+    language = language_code.lower().split("-")[0]
+    tts_client = tts_clients.get(language)
+    if tts_client and tts_client.is_configured:
+        language_name = TTS_SETTINGS[language][1]
+        gender = st.selectbox(
+            "Voice",
+            options=("female", "male"),
+            format_func=lambda value: value.capitalize(),
+            key=f"{key}_{language}_anuvaadhub_gender",
+        )
+        audio_key = f"anuvaadhub_tts_audio_{language}_{key}"
+        text_key = f"anuvaadhub_tts_text_{language}_{key}"
+        gender_key = f"anuvaadhub_tts_gender_{language}_{key}"
+        if st.button(
+            button_label or f"Generate and play {language_name} audio",
+            key=f"{key}_{language}_anuvaadhub_tts",
+        ):
+            try:
+                with st.spinner(f"Generating {language_name} audio…"):
+                    st.session_state[audio_key] = tts_client.synthesize(text, gender)
+                    st.session_state[text_key] = text
+                    st.session_state[gender_key] = gender
+            except AnuvaadHubTTSError as exc:
+                report_api_error(exc)
+        if (
+            st.session_state.get(audio_key)
+            and st.session_state.get(text_key) == text
+            and st.session_state.get(gender_key) == gender
+        ):
+            st.audio(
+                st.session_state[audio_key],
+                format="audio/wav",
+                autoplay=autoplay_audio,
+            )
+    else:
+        browser_speak_button(
+            text,
+            language_code,
+            button_label or "🔊 Speak this text",
+        )
+        if language in TTS_SETTINGS:
+            language_name = TTS_SETTINGS[language][1]
+            prefix = TTS_SETTINGS[language][0]
+            st.caption(
+                f"Using the browser voice. Add {prefix}_URL and "
+                f"{prefix}_TOKEN to .env to use AnuvaadHub {language_name} TTS."
+            )
+
+
+
+def mode_header(mode: str, title: str, prompt: str, ui_code: str) -> None:
+    if st.button(COPY[ui_code]["back"], key=f"back_{mode}"):
+        go_home()
+    st.header(title)
+    st.write(prompt)
+    speak_output(
+        prompt,
+        ui_code,
+        f"instruction_{mode}",
+        button_label=COPY[ui_code]["listen"],
+        autoplay_audio=True,
+    )
+
+
+if "mode" not in st.session_state:
+    st.session_state["mode"] = None
+if "menu_text_editor" not in st.session_state:
+    st.session_state["menu_text_editor"] = ""
+if "speech_transcript_editor" not in st.session_state:
+    st.session_state["speech_transcript_editor"] = ""
+
+with st.sidebar:
+    st.title("SahAI")
+    ui_code = language_picker("Interface language / भाषा / ਭਾਸ਼ਾ", "interface_language", "en")
+    st.divider()
+    configured_tts = [
+        name for language, (prefix, name) in TTS_SETTINGS.items()
+        if tts_clients[language].is_configured
+    ]
+    if configured_tts:
+        st.success("AnuvaadHub TTS configured: " + ", ".join(configured_tts))
+    else:
+        st.info("Speech recognition and text translation use AnuvaadHub. Text-to-speech uses browser voices or configured AnuvaadHub models.")
+
+ui = COPY[ui_code]
+st.title("🧭 SahAI — Accessible Language Companion")
+st.caption("A starter app for English, Hindi and Punjabi")
+
+if st.session_state["mode"] is None:
+    st.header(ui["choose"])
+    st.write(ui["welcome"])
+    speak_output(
+        ui["welcome"],
+        ui_code,
+        "welcome_instruction",
+        button_label=ui["listen"],
+        autoplay_audio=True,
+    )
+
+    col1, col2, col3 = st.columns(3, gap="large")
+    with col1:
+        st.markdown("### 👁️")
+        st.subheader(ui["blind"])
+        st.write(ui["blind_desc"])
+        if st.button("Choose blind / low vision", key="choose_blind", use_container_width=True):
+            save_mode("blind")
+    with col2:
+        st.markdown("### 📝")
+        st.subheader(ui["deaf"])
+        st.write(ui["deaf_desc"])
+        if st.button("Choose deaf / hard of hearing", key="choose_deaf", use_container_width=True):
+            save_mode("deaf")
+    with col3:
+        st.markdown("### 🗣️")
+        st.subheader(ui["speech"])
+        st.write(ui["speech_desc"])
+        if st.button("Choose speech support", key="choose_speech", use_container_width=True):
+            save_mode("speech")
+
+    st.divider()
+    st.subheader(ui["record_mode"])
+    mode_audio = st.audio_input("Record your answer (English, Hindi or Punjabi)", sample_rate=16000, key="mode_audio")
+    mode_audio_lang = language_picker("Language you spoke", "mode_audio_language", ui_code)
+    if st.button(ui["detect"], disabled=mode_audio is None, key="detect_mode_button"):
+        try:
+            with st.spinner("Recognizing speech…"):
+                recognized = run_transcription(mode_audio, mode_audio_lang)
+            st.write(f"**Recognized:** {recognized}")
+            detected = detect_mode(recognized)
+            if detected:
+                save_mode(detected)
+            else:
+                st.warning("I couldn't confidently identify a mode. Please tap one of the three buttons above.")
+        except AnuvaadHubError as exc:
+            report_api_error(exc)
+
+elif st.session_state["mode"] == "blind":
+    mode_header(
+        "blind",
+        "👁️ Menu and sign reader",
+        "Take a photo of a menu or sign. The app extracts text so you can review, translate and listen to it.",
+        ui_code,
+    )
+    st.info("Camera access depends on your browser/device. On a phone, the camera may open directly; on a laptop, it may use the webcam.")
+    camera_photo = st.camera_input("Take a picture of the menu or sign", key="menu_camera")
+    uploaded_photo = st.file_uploader("Or upload a picture", type=["png", "jpg", "jpeg", "webp"], key="menu_upload")
+    photo = camera_photo or uploaded_photo
+    photo_lang = language_picker("Language printed on the menu", "menu_ocr_language", ui_code)
+
+    if photo is not None:
+        st.image(photo, caption="Image to read", use_container_width=True)
+    if st.button("Extract text from image", disabled=photo is None, key="extract_menu_text"):
+        try:
+            import pytesseract
+            tesseract_cmd = get_secret("TESSERACT_CMD")
+            if tesseract_cmd:
+                pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+            ocr_code = TESSERACT_LANGS[photo_lang]
+            with st.spinner("Reading the image…"):
+                recognized_text = pytesseract.image_to_string(Image.open(io.BytesIO(photo.getvalue())).convert("RGB"), lang=ocr_code).strip()
+            st.session_state["menu_text_editor"] = recognized_text
+            st.session_state["menu_source_language"] = photo_lang
+            if not recognized_text:
+                st.warning("No text was detected. Try a clearer, well-lit, straight-on photo.")
+        except ImportError:
+            st.error("The Python OCR package is missing. Run: pip install pytesseract")
+        except Exception as exc:
+            if "tesseract is not installed" in str(exc).lower() or "not found" in str(exc).lower():
+                st.error("Tesseract OCR is not installed or not configured. Follow the Windows setup instructions in README.md and set TESSERACT_CMD in .env if needed.")
+            else:
+                st.error(f"Could not read this image: {exc}")
+
+    st.subheader("Recognized menu text")
+    menu_text = st.text_area("Correct any OCR mistakes here", key="menu_text_editor", height=170, placeholder="Extracted menu text will appear here…")
+    source_code = st.session_state.get("menu_source_language", photo_lang)
+    target_code = language_picker("Translate menu into", "menu_target_language", "en")
+    if st.button("Translate menu", key="translate_menu", disabled=not menu_text.strip()):
+        try:
+            with st.spinner("Translating menu…"):
+                st.session_state["translated_menu"] = AnuvaadHubMTClient().translate(
+                    menu_text, source_code, target_code
+                )
+                st.session_state["translated_menu_lang"] = target_code
+        except AnuvaadHubMTError as exc:
+            report_api_error(exc)
+    translated_menu = st.session_state.get("translated_menu", "")
+    if translated_menu:
+        st.subheader("Translated menu")
+        st.write(translated_menu)
+        speak_output(translated_menu, st.session_state.get("translated_menu_lang", target_code), "tts_translated_menu")
+    elif menu_text.strip():
+        st.subheader("Listen to recognized text")
+        speak_output(menu_text, source_code, "tts_original_menu")
+
+elif st.session_state["mode"] == "deaf":
+    mode_header(
+        "deaf",
+        "📝 Speech-to-text and translation",
+        "Record a short spoken message nearby, or type/paste text. The app converts recorded speech to text and can translate it for you to read.",
+        ui_code,
+    )
+    speech_audio = st.audio_input("Record speech to turn into text", sample_rate=16000, key="deaf_audio")
+    audio_lang = language_picker("Language being spoken", "deaf_audio_language", ui_code)
+    if st.button("Transcribe recording", disabled=speech_audio is None, key="transcribe_deaf_audio"):
+        try:
+            with st.spinner("Converting speech to text…"):
+                recognized_text = run_transcription(speech_audio, audio_lang)
+
+                # A new recording must not display an old translation.
+                for key in (
+                    "deaf_translation",
+                    "deaf_translation_lang",
+                    "deaf_translation_display",
+                    "deaf_translation_source_text",
+                    "deaf_translation_target_code",
+                ):
+                    st.session_state.pop(key, None)
+
+                st.session_state["speech_transcript_editor"] = recognized_text
+                st.session_state["deaf_source_language"] = audio_lang
+        except AnuvaadHubError as exc:
+            report_api_error(exc)
+
+    message_text = st.text_area("Transcript or text to read", key="speech_transcript_editor", height=160, placeholder="The transcript will appear here. You can edit it or type directly.")
+    source_code = st.session_state.get("deaf_source_language", audio_lang)
+    target_code = language_picker("Translate into", "deaf_target_language", "en")
+    if st.button("Translate text", key="translate_deaf_text", disabled=not message_text.strip()):
+        try:
+            with st.spinner("Translating…"):
+                st.session_state["deaf_translation"] = AnuvaadHubMTClient().translate(
+                    message_text, source_code, target_code
+                )
+                st.session_state["deaf_translation_lang"] = target_code
+                st.session_state["deaf_translation_source_text"] = message_text
+                st.session_state["deaf_translation_target_code"] = target_code
+        except AnuvaadHubMTError as exc:
+            report_api_error(exc)
+    translated = st.session_state.get("deaf_translation", "")
+    translation_is_current = (
+        bool(translated)
+        and st.session_state.get("deaf_translation_source_text") == message_text
+        and st.session_state.get("deaf_translation_target_code") == target_code
+    )
+
+    if translation_is_current:
+        st.subheader("Translated text")
+        if st.session_state.get("deaf_translation_display") != translated:
+            st.session_state["deaf_translation_display"] = translated
+        st.text_area(
+            "Read or copy the translation",
+            height=150,
+            key="deaf_translation_display",
+        )
+
+elif st.session_state["mode"] == "speech":
+    mode_header(
+        "speech",
+        "🗣️ Type-to-speech communication",
+        "Type what you want to say. You can keep it in the same language or translate it into English, Hindi or Punjabi, then play it aloud for the listener.",
+        ui_code,
+    )
+    message_text = st.text_area("Type your message", height=170, placeholder="Type a message in English, Hindi or Punjabi…", key="nonspeaking_message")
+    source_code = language_picker("Language you typed", "speech_source_language", ui_code)
+    target_code = language_picker("Speak in this language", "speech_target_language", source_code)
+    if st.button("Translate message", key="translate_nonspeaking", disabled=not message_text.strip()):
+        try:
+            with st.spinner("Preparing your message…"):
+                st.session_state["speech_output_text"] = AnuvaadHubMTClient().translate(
+                    message_text, source_code, target_code
+                )
+                st.session_state["speech_output_language"] = target_code
+        except AnuvaadHubMTError as exc:
+            report_api_error(exc)
+    if st.button("Use my original message", key="use_original_message", disabled=not message_text.strip()):
+        st.session_state["speech_output_text"] = message_text.strip()
+        st.session_state["speech_output_language"] = source_code
+
+    output_text = st.session_state.get("speech_output_text", "")
+    output_language = st.session_state.get("speech_output_language", target_code)
+    if output_text:
+        st.subheader("Message to share")
+        if st.session_state.get("speech_output_display") != output_text:
+            st.session_state["speech_output_display"] = output_text
+        st.text_area("Review the message", height=130, key="speech_output_display")
+        speak_output(output_text, output_language, "tts_nonspeaking_output")
